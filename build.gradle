@@ -35,11 +35,7 @@ repositories {
 	jcenter()
 	maven {
 		name = 'Fabric'
-		url = 'http://maven.modmuss50.me/'
-	}
-	maven {
-		name = 'SpongePowered'
-		url = 'http://repo.spongepowered.org/maven'
+		url = 'https://maven.fabricmc.net/'
 	}
 	maven {
 		name = 'mojang'
@@ -65,20 +61,21 @@ dependencies {
 	compileOnly 'com.google.code.findbugs:jsr305:3.0.2'
 
 	// fabric-loader dependencies
-	installed 'org.ow2.asm:asm:8.0'
-	installed 'org.ow2.asm:asm-analysis:8.0'
-	installed 'org.ow2.asm:asm-commons:8.0'
-	installed 'org.ow2.asm:asm-tree:8.0'
-	installed 'org.ow2.asm:asm-util:8.0'
+	annotationProcessor installed ("org.ow2.asm:asm:${project.asm_version}")
+	annotationProcessor installed ("org.ow2.asm:asm-analysis:${project.asm_version}")
+	annotationProcessor installed ("org.ow2.asm:asm-commons:${project.asm_version}")
+	annotationProcessor installed ("org.ow2.asm:asm-tree:${project.asm_version}")
+	annotationProcessor installed ("org.ow2.asm:asm-util:${project.asm_version}")
 
-	installed('net.fabricmc:sponge-mixin:0.8+build.18') {
+	installed('net.fabricmc:sponge-mixin:0.8.2+build.23') {
 		exclude module: 'launchwrapper'
-		exclude module: 'guava'
+		//exclude module: 'guava'
 	}
 	installed 'net.fabricmc:tiny-mappings-parser:0.2.2.14'
-	installed 'net.fabricmc:tiny-remapper:0.2.2.64'
+	installed 'net.fabricmc:tiny-remapper:0.3.0.70'
+	installed 'net.fabricmc:access-widener:1.0.0'
 
-	installed 'com.google.jimfs:jimfs:1.1'
+	installed 'com.google.jimfs:jimfs:1.2-fabric'
 	installed 'net.fabricmc:fabric-loader-sat4j:2.3.5.4'
 
 	// launchwrapper + dependencies
@@ -86,18 +83,18 @@ dependencies {
 		transitive = false
 	}
 	launchwrapper 'net.sf.jopt-simple:jopt-simple:5.0.3'
+
+	testCompileOnly 'org.jetbrains:annotations:19.0.0'
+
+	// Unit testing for mod metadata
+	testImplementation('org.junit.jupiter:junit-jupiter:5.6.2')
 }
 
 processResources {
-	inputs.property "version", version
+	inputs.property "version", project.version
 
-	from(sourceSets.main.resources.srcDirs) {
-		include 'fabric.mod.json'
-		expand 'version':version
-	}
-
-	from(sourceSets.main.resources.srcDirs) {
-		exclude 'fabric.mod.json'
+	filesMatching("fabric.mod.json") {
+		expand "version": project.version
 	}
 }
 
@@ -221,6 +218,37 @@ task sourcesJar(type: Jar, dependsOn: classes) {
 	from sourceSets.main.allSource
 }
 
+javadoc {
+	options {
+		if (file("README.html").exists()) {
+			overview = "README.html"
+		}
+		source = "8"
+		encoding = 'UTF-8'
+		charSet = 'UTF-8'
+		memberLevel = JavadocMemberLevel.PACKAGE
+		links(
+				'https://asm.ow2.io/javadoc/',
+				'https://docs.oracle.com/javase/8/docs/api/',
+				'https://logging.apache.org/log4j/2.x/log4j-api/apidocs/'
+		)
+		// Disable the crazy super-strict doclint tool in Java 8
+		addStringOption('Xdoclint:none', '-quiet')
+	}
+	source sourceSets.main.allJava.srcDirs
+	classpath = sourceSets.main.compileClasspath + sourceSets.main.output // compile impl stuff for dep as well
+	include("**/api/**")
+	// workaround as one of the api stuff use that package
+	failOnError false
+}
+
+task javadocJar(type: Jar) {
+	dependsOn javadoc
+	from javadoc.destinationDir
+	classifier = 'javadoc'
+}
+build.dependsOn javadocJar
+
 publishing {
 	publications {
 		mavenJava(MavenPublication) {
@@ -231,6 +259,7 @@ publishing {
 			artifact(sourcesJar) {
 				builtBy sourcesJar
 			}
+			artifact javadocJar
 			artifact(createInstallerJSON.outputs.files.singleFile) {
 				builtBy copyJson
 			}
@@ -257,6 +286,12 @@ publishing {
 
 apply from: 'https://github.com/FabricMC/fabric-docs/raw/master/gradle/license.gradle'
 apply from: 'https://github.com/FabricMC/fabric-docs/raw/master/gradle/ideconfig.gradle'
+
 license {
+	// Exclude gson since it is google's code, we just modify and bundle it
+	exclude '**/JsonReader.java'
+	exclude '**/JsonScope.java'
+	exclude '**/JsonToken.java'
+	exclude '**/MalformedJsonException.java'
 	exclude '**/io/github/minecraftcursedlegacy/**'
 }

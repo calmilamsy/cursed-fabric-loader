@@ -16,9 +16,12 @@
 
 package net.fabricmc.loader;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -31,6 +34,8 @@ import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import org.objectweb.asm.Opcodes;
+
 import net.fabricmc.api.EnvType;
 import net.fabricmc.loader.api.LanguageAdapter;
 import net.fabricmc.loader.api.MappingResolver;
@@ -41,14 +46,17 @@ import net.fabricmc.loader.discovery.DirectoryModCandidateFinder;
 import net.fabricmc.loader.discovery.ModCandidate;
 import net.fabricmc.loader.discovery.ModResolutionException;
 import net.fabricmc.loader.discovery.ModResolver;
+import net.fabricmc.loader.discovery.RuntimeModRemapper;
 import net.fabricmc.loader.game.GameProvider;
 import net.fabricmc.loader.gui.FabricGuiEntry;
 import net.fabricmc.loader.launch.common.FabricLauncherBase;
 import net.fabricmc.loader.launch.knot.Knot;
 import net.fabricmc.loader.metadata.EntrypointMetadata;
 import net.fabricmc.loader.metadata.LoaderModMetadata;
-import net.fabricmc.loader.transformer.accesswidener.AccessWidener;
 import net.fabricmc.loader.util.DefaultLanguageAdapter;
+import net.fabricmc.loader.util.SystemProperties;
+import net.fabricmc.accesswidener.AccessWidener;
+import net.fabricmc.accesswidener.AccessWidenerReader;
 
 /**
  * The main class for mod loading operations.
@@ -61,6 +69,8 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 	@Deprecated
 	public static final FabricLoader INSTANCE = new FabricLoader();
 
+	public static final int ASM_VERSION = Opcodes.ASM9;
+
 	protected static Logger LOGGER = LogManager.getFormatterLogger("Fabric|Loader");
 
 	protected final Map<String, ModContainer> modMap = new HashMap<>();
@@ -68,7 +78,7 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 
 	private final Map<String, LanguageAdapter> adapterMap = new HashMap<>();
 	private final EntrypointStorage entrypointStorage = new EntrypointStorage();
-	private final AccessWidener accessWidener = new AccessWidener(this);
+	private final AccessWidener accessWidener = new AccessWidener();
 
 	private boolean frozen = false;
 
@@ -76,8 +86,8 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 
 	private MappingResolver mappingResolver;
 	private GameProvider provider;
-	private File gameDir;
-	private File configDir;
+	private Path gameDir;
+	private Path configDir;
 
 	protected FabricLoader() {
 	}
@@ -103,12 +113,12 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 	public void setGameProvider(GameProvider provider) {
 		this.provider = provider;
 
-		setGameDir(provider.getLaunchDirectory().toFile());
+		setGameDir(provider.getLaunchDirectory());
 	}
 
-	private void setGameDir(File gameDir) {
+	private void setGameDir(Path gameDir) {
 		this.gameDir = gameDir;
-		this.configDir = new File(gameDir, "config");
+		this.configDir = gameDir.resolve("config");
 	}
 
 	@Override
@@ -125,23 +135,44 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 	 * @return The game instance's root directory.
 	 */
 	@Override
-	public File getGameDirectory() {
+	public Path getGameDir() {
 		return gameDir;
+	}
+
+	@Override
+	@Deprecated
+	public File getGameDirectory() {
+		return getGameDir().toFile();
 	}
 
 	/**
 	 * @return The game instance's configuration directory.
 	 */
 	@Override
-	public File getConfigDirectory() {
-		if (!configDir.exists()) {
-			configDir.mkdirs();
+	public Path getConfigDir() {
+		if (!Files.exists(configDir)) {
+			try {
+				Files.createDirectories(configDir);
+			} catch (IOException e) {
+				throw new RuntimeException("Creating config directory", e);
+			}
 		}
 		return configDir;
 	}
 
+	@Override
+	@Deprecated
+	public File getConfigDirectory() {
+		return getConfigDir().toFile();
+	}
+
+	public Path getModsDir() {
+		return getGameDir().resolve("mods");
+	}
+
+	@Deprecated
 	public File getModsDirectory() {
-		return new File(getGameDirectory(), "mods");
+		return getModsDir().toFile();
 	}
 
 	public void load() {
@@ -158,7 +189,7 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 	private void setup() throws ModResolutionException {
 		ModResolver resolver = new ModResolver();
 		resolver.addCandidateFinder(new ClasspathModCandidateFinder());
-		resolver.addCandidateFinder(new DirectoryModCandidateFinder(getModsDirectory().toPath()));
+		resolver.addCandidateFinder(new DirectoryModCandidateFinder(getModsDir(), isDevelopmentEnvironment()));
 		Map<String, ModCandidate> candidateMap = resolver.resolve(this);
 
 		String modText;
@@ -178,8 +209,21 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 			.map(info -> String.format("%s@%s", info.getInfo().getId(), info.getInfo().getVersion().getFriendlyString()))
 			.collect(Collectors.joining(", ")));
 
-		for (ModCandidate candidate : candidateMap.values()) {
-			addMod(candidate);
+		boolean runtimeModRemapping = isDevelopmentEnvironment();
+
+		if (runtimeModRemapping && System.getProperty(SystemProperties.REMAP_CLASSPATH_FILE) == null) {
+			LOGGER.warn("Runtime mod remapping disabled due to no fabric.remapClasspathFile being specified. You may need to update loom.");
+			runtimeModRemapping = false;
+		}
+
+		if (runtimeModRemapping) {
+			for (ModCandidate candidate : RuntimeModRemapper.remap(candidateMap.values(), ModResolver.getInMemoryFs())) {
+				addMod(candidate);
+			}
+		} else {
+			for (ModCandidate candidate : candidateMap.values()) {
+				addMod(candidate);
+			}
 		}
 	}
 
@@ -337,7 +381,25 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 		}
 	}
 
-	private void prepareModInit(File newRunDir, Object gameInstance) {
+	public void loadAccessWideners() {
+		AccessWidenerReader accessWidenerReader = new AccessWidenerReader(accessWidener);
+		for (net.fabricmc.loader.api.ModContainer modContainer : getAllMods()) {
+			LoaderModMetadata modMetadata = (LoaderModMetadata) modContainer.getMetadata();
+			String accessWidener = modMetadata.getAccessWidener();
+
+			if (accessWidener != null) {
+				Path path = modContainer.getPath(accessWidener);
+
+				try (BufferedReader reader = Files.newBufferedReader(path)) {
+					accessWidenerReader.read(reader, getMappingResolver().getCurrentRuntimeNamespace());
+				} catch (Exception e) {
+					throw new RuntimeException("Failed to read accessWidener file from mod " + modMetadata.getId(), e);
+				}
+			}
+		}
+	}
+
+	private void prepareModInit(Path newRunDir, Object gameInstance) {
 		if (!frozen) {
 			throw new RuntimeException("Cannot instantiate mods when not frozen!");
 		}
@@ -376,8 +438,8 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 
 		if (gameDir != null) {
 			try {
-				if (!gameDir.getCanonicalFile().equals(newRunDir.getCanonicalFile())) {
-					getLogger().warn("Inconsistent game execution directories: engine says " + newRunDir.getAbsolutePath() + ", while initializer says " + gameDir.getAbsolutePath() + "...");
+				if (!gameDir.toRealPath().equals(newRunDir.toRealPath())) {
+					getLogger().warn("Inconsistent game execution directories: engine says " + newRunDir.toRealPath() + ", while initializer says " + gameDir.toRealPath() + "...");
 					setGameDir(newRunDir);
 				}
 			} catch (IOException e) {
@@ -396,7 +458,28 @@ public class FabricLoader implements net.fabricmc.loader.api.FabricLoader {
 		return LOGGER;
 	}
 
+	/**
+	 * Sets the game instance. This is only used in 20w22a+ by the dedicated server and should not be called by anything else.
+	 */
+	@Deprecated
+	public void setGameInstance(Object gameInstance) {
+		if (this.getEnvironmentType() != EnvType.SERVER) {
+			throw new UnsupportedOperationException("Cannot set game instance on a client!");
+		}
+
+		if (this.gameInstance != null) {
+			throw new UnsupportedOperationException("Cannot overwrite current game instance!");
+		}
+
+		this.gameInstance = gameInstance;
+	}
+
 	public static void preInit(File newRunDir, Object gameInstance) {
-		INSTANCE.prepareModInit(newRunDir, gameInstance);
+		INSTANCE.prepareModInit(newRunDir.toPath(), gameInstance);
+	}
+
+	@Override
+	public String[] getLaunchArguments(boolean sanitize) {
+		return getGameProvider().getLaunchArguments(sanitize);
 	}
 }
